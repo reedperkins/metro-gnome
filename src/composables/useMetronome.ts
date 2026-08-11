@@ -1,4 +1,4 @@
-import { ref, onUnmounted } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { Capacitor, registerPlugin } from '@capacitor/core'
 
 interface AudioSessionPlugin {
@@ -154,6 +154,22 @@ export function useMetronome(initialTempo = 120) {
   function setBarsOff(n: number) {
     barsOff.value = Math.max(1, n)
   }
+
+  // Turning Mute Bars on mid-playback is a mode switch, not a tweak — just
+  // stop so the user can review the settings and hit Start deliberately.
+  watch(muteBarsEnabled, () => {
+    if (isPlaying.value) stop()
+  })
+
+  // Changing the play/mute bar counts mid-playback leaves the scheduler's
+  // bar count out of sync with what the user now expects (e.g. they wanted
+  // a fresh "2 bars on" starting now, not partway through an old cycle).
+  // Restart from bar 0 immediately so the beat doesn't drift or double up.
+  watch([barsOn, barsOff], () => {
+    if (!isPlaying.value) return
+    stop()
+    start()
+  })
 
   onUnmounted(stop)
 
