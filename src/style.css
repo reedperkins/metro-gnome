@@ -1,0 +1,24 @@
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+html,
+body {
+  overscroll-behavior: none;
+  overflow: hidden;
+}
+
+button,
+label {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
