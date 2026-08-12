@@ -19,24 +19,49 @@ const ATTACK_TIME = 0.001
 // warm-up may not have finished by the time the click event fires.
 const START_LEAD_TIME = 0.06
 
-export const TIME_SIGNATURES = ['4/4', '3/4', '6/8', '12/8'] as const
-export type TimeSignature = (typeof TIME_SIGNATURES)[number]
+export const TEMPO_MIN = 60
+export const TEMPO_MAX = 200
 
-// `pulses` = main beats per bar (what the tempo/BPM refers to).
-// `subdivision` = clicks per pulse: 1 for simple meters, 3 for compound
-// (6/8, 12/8), so the tempo stays anchored to the dotted-quarter pulse and
-// the extra clicks land as a triplet feel rather than speeding up the tempo.
-const SIGNATURE_CONFIG: Record<TimeSignature, { pulses: number; subdivision: number }> = {
-  '4/4': { pulses: 4, subdivision: 1 },
-  '3/4': { pulses: 3, subdivision: 1 },
-  '6/8': { pulses: 2, subdivision: 3 },
-  '12/8': { pulses: 4, subdivision: 3 },
+export const BEATS_MIN = 1
+export const BEATS_MAX = 12
+
+// Divisions of the beat that can be layered on top of it. The beat itself
+// always clicks, so these are purely additive — switching one on doesn't
+// replace another, and two that share a position (eighths and sixteenths both
+// land on the half-beat) collapse to a single click rather than doubling up.
+// The tempo always refers to the beat, so adding a layer packs more clicks
+// into the same pulse rather than speeding it up. That's what makes an
+// explicit time signature unnecessary: "6/8" is 2 beats with triplets on.
+// Drawn as SVG rather than set in a music font: SMuFL has no beamed-triplet
+// character at all (Unicode's music glyphs are fixed 2- and 4-note groups), and
+// its glyphs are staff-scale, so they never sit right at icon size.
+// `notes` = noteheads in the group, `beams` = beam lines (0 = an unbeamed
+// quarter, 1 = eighths, 2 = sixteenths), `tuplet` = numeral above the beam.
+export const SUBDIVISIONS = [
+  { value: 1, notes: 1, beams: 0, tuplet: false, name: 'Beat' },
+  { value: 2, notes: 2, beams: 1, tuplet: false, name: 'Eighth notes' },
+  { value: 3, notes: 3, beams: 1, tuplet: true, name: 'Eighth-note triplets' },
+  { value: 4, notes: 2, beams: 2, tuplet: false, name: 'Sixteenth notes' },
+] as const
+export type Subdivision = (typeof SUBDIVISIONS)[number]['value']
+
+// Pitch and level per layer. Eighths and triplets share a voice: both divide
+// the beat once, so they're the same rhythmic role and only differ in how many
+// clicks land. Sixteenths sit a level finer and drop below both, keeping the
+// hierarchy that lets a stack of layers be heard as separate layers.
+const VOICE: Record<number, { freq: number; peak: number }> = {
+  1: { freq: 1200, peak: 0.7 },
+  2: { freq: 1050, peak: 0.5 },
+  3: { freq: 1050, peak: 0.5 },
+  4: { freq: 900, peak: 0.34 },
 }
 
 export function useMetronome(initialTempo = 120) {
   const tempo = ref(initialTempo)
   const isPlaying = ref(false)
-  const timeSignature = ref<TimeSignature>('4/4')
+  const beatsPerBar = ref(4)
+  // The beat is on by default; it's the metronome's whole point.
+  const subdivisions = ref<Subdivision[]>([1])
 
   // Fires only on audible pulse beats (not subdivision filler clicks or
   // muted bars) so the UI can trigger a decaying flash impulse.
@@ -53,6 +78,9 @@ export function useMetronome(initialTempo = 120) {
   let nextNoteTime = 0
   let schedulerBeat = 0
   let schedulerBar = 0
+  // Which beat counts as beat 1. Changing the meter moves this rather than
+  // restarting the clock, so the pulse never breaks stride.
+  let barAnchor = 0
 
   function isBarMuted(barIndex: number): boolean {
     if (!muteBarsEnabled.value) return false
@@ -61,18 +89,38 @@ export function useMetronome(initialTempo = 120) {
     return (barIndex % cycleLength) >= barsOn.value
   }
 
-  function scheduleNote(clickWithinBar: number, barIndex: number, isPulse: boolean, time: number) {
+  // Positions within one beat that click, each tagged with the coarsest active
+  // layer that lands on it. Coarse layers subsume fine ones — sixteenths cover
+  // every eighth position — so without this tag, turning eighths on while
+  // sixteenths are already on would change nothing audible at all. Tagging by
+  // the coarsest layer instead accents those shared positions, which is what
+  // "eighths and sixteenths together" should sound like.
+  function beatClicks(): { offset: number; level: number }[] {
+    const level = new Map<number, number>()
+    for (const n of [...subdivisions.value].sort((a, b) => a - b)) {
+      for (let i = n === 1 ? 0 : 1; i < n; i++) {
+        const offset = i / n
+        // Sorted ascending, so the first layer to claim a position is the
+        // coarsest one and later, finer layers must not overwrite it.
+        if (!level.has(offset)) level.set(offset, n)
+      }
+    }
+    return [...level.entries()]
+      .map(([offset, l]) => ({ offset, level: l }))
+      .sort((a, b) => a.offset - b.offset)
+  }
+
+  function scheduleNote(isBarStart: boolean, barIndex: number, level: number, time: number) {
     if (!audioCtx) return
-    const isBarStart = clickWithinBar === 0
-    const muted = isBarMuted(barIndex)
+    if (isBarMuted(barIndex)) return
 
-    if (!muted) {
-      const osc = audioCtx.createOscillator()
-      osc.type = 'sine'
-      osc.frequency.value = isBarStart ? 1500 : isPulse ? 1200 : 900
+    const osc = audioCtx.createOscillator()
+    osc.type = 'sine'
+    osc.frequency.value = isBarStart ? 1500 : VOICE[level].freq
+    const peak = isBarStart ? 0.9 : VOICE[level].peak
 
+    {
       const gain = audioCtx.createGain()
-      const peak = isBarStart ? 0.9 : isPulse ? 0.7 : 0.4
       // The attack has to be long enough to avoid a discontinuity at the
       // waveform's zero crossing (a 1ms step at 1500Hz clicks), but short
       // enough that the beat still reads as sharp.
@@ -87,28 +135,43 @@ export function useMetronome(initialTempo = 120) {
       osc.stop(time + 0.06)
     }
 
-    if (isPulse && !muted) {
-      const delayMs = Math.max(0, (time - audioCtx.currentTime) * 1000)
-      setTimeout(() => {
-        flashStrong.value = isBarStart
-        flashId.value++
-      }, delayMs)
-    }
+  }
+
+  // Independent of whether the beat actually clicks: with the beat switched off
+  // the light is the only thing still marking it, so it keeps pulsing.
+  function scheduleFlash(isBarStart: boolean, barIndex: number, time: number) {
+    if (!audioCtx || isBarMuted(barIndex)) return
+    const delayMs = Math.max(0, (time - audioCtx.currentTime) * 1000)
+    setTimeout(() => {
+      flashStrong.value = isBarStart
+      flashId.value++
+    }, delayMs)
   }
 
   function scheduler() {
     if (!audioCtx) return
+    // A whole beat is scheduled at once, rather than one click at a time, so
+    // the subdivision layers are only ever read at a beat boundary. Toggling a
+    // layer mid-beat therefore takes effect on the next beat instead of
+    // disturbing the pulse that's already in flight.
     while (nextNoteTime < audioCtx.currentTime + SCHEDULE_AHEAD_TIME) {
-      const { pulses, subdivision } = SIGNATURE_CONFIG[timeSignature.value]
-      const clicksPerBar = pulses * subdivision
-      const clickWithinBar = schedulerBeat % clicksPerBar
-      const isPulse = clickWithinBar % subdivision === 0
-      const secondsPerClick = 60.0 / tempo.value / subdivision
+      const secondsPerBeat = 60.0 / tempo.value
+      const beatWithinBar = (schedulerBeat - barAnchor) % beatsPerBar.value
 
-      scheduleNote(clickWithinBar, schedulerBar, isPulse, nextNoteTime)
-      nextNoteTime += secondsPerClick
+      scheduleFlash(beatWithinBar === 0, schedulerBar, nextNoteTime)
+
+      for (const { offset, level } of beatClicks()) {
+        scheduleNote(
+          beatWithinBar === 0 && offset === 0,
+          schedulerBar,
+          level,
+          nextNoteTime + offset * secondsPerBeat,
+        )
+      }
+
+      nextNoteTime += secondsPerBeat
       schedulerBeat++
-      if (schedulerBeat % clicksPerBar === 0) {
+      if ((schedulerBeat - barAnchor) % beatsPerBar.value === 0) {
         schedulerBar++
       }
     }
@@ -160,6 +223,7 @@ export function useMetronome(initialTempo = 120) {
     if (!audioCtx) return
     schedulerBeat = 0
     schedulerBar = 0
+    barAnchor = 0
     nextNoteTime = audioCtx.currentTime + START_LEAD_TIME
     timerId = window.setInterval(scheduler, LOOKAHEAD_MS)
     isPlaying.value = true
@@ -178,20 +242,13 @@ export function useMetronome(initialTempo = 120) {
   }
 
   function setTempo(bpm: number) {
-    tempo.value = Math.min(200, Math.max(60, bpm))
+    tempo.value = Math.min(TEMPO_MAX, Math.max(TEMPO_MIN, bpm))
   }
 
-  function cycleTimeSignature() {
-    const idx = TIME_SIGNATURES.indexOf(timeSignature.value)
-    timeSignature.value = TIME_SIGNATURES[(idx + 1) % TIME_SIGNATURES.length]
-  }
-
-  function setBarsOn(n: number) {
-    barsOn.value = Math.max(1, n)
-  }
-
-  function setBarsOff(n: number) {
-    barsOff.value = Math.max(1, n)
+  function toggleSubdivision(n: Subdivision) {
+    subdivisions.value = subdivisions.value.includes(n)
+      ? subdivisions.value.filter((s) => s !== n)
+      : [...subdivisions.value, n]
   }
 
   // Turning Mute Bars on mid-playback is a mode switch, not a tweak — just
@@ -204,10 +261,20 @@ export function useMetronome(initialTempo = 120) {
   // bar count out of sync with what the user now expects (e.g. they wanted
   // a fresh "2 bars on" starting now, not partway through an old cycle).
   // Restart from bar 0 immediately so the beat doesn't drift or double up.
+  // Changing the meter re-anchors the downbeat to the next beat that hasn't
+  // been scheduled yet, instead of restarting. A restart would reset the beat
+  // clock mid-beat AND leave already-scheduled notes to fire against the new
+  // grid — a truncated beat followed by a doubled click, heard as a stutter.
+  watch(beatsPerBar, () => {
+    if (isPlaying.value) barAnchor = schedulerBeat
+  })
+
+  // The mute cycle is counted in whole bars, so re-anchoring it needs the bar
+  // counter reset too; the next bar boundary is the natural place for that.
   watch([barsOn, barsOff], () => {
     if (!isPlaying.value) return
-    stop()
-    start()
+    barAnchor = schedulerBeat
+    schedulerBar = 0
   })
 
   onUnmounted(stop)
@@ -217,7 +284,8 @@ export function useMetronome(initialTempo = 120) {
     isPlaying,
     flashId,
     flashStrong,
-    timeSignature,
+    beatsPerBar,
+    subdivisions,
     muteBarsEnabled,
     barsOn,
     barsOff,
@@ -226,8 +294,6 @@ export function useMetronome(initialTempo = 120) {
     stop,
     toggle,
     setTempo,
-    cycleTimeSignature,
-    setBarsOn,
-    setBarsOff,
+    toggleSubdivision,
   }
 }

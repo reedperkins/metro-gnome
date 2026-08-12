@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useMetronome } from './composables/useMetronome'
+import {
+  useMetronome,
+  BEATS_MIN,
+  BEATS_MAX,
+  TEMPO_MIN,
+  TEMPO_MAX,
+  SUBDIVISIONS,
+} from './composables/useMetronome'
+import Stepper from './components/Stepper.vue'
+import SettingRow from './components/SettingRow.vue'
+import NoteIcon from './components/NoteIcon.vue'
 import logoUrl from './assets/logo-sheet.svg'
 
 const {
@@ -8,20 +18,16 @@ const {
   isPlaying,
   flashId,
   flashStrong,
-  timeSignature,
+  beatsPerBar,
+  subdivisions,
   muteBarsEnabled,
   barsOn,
   barsOff,
   prime,
   toggle,
   setTempo,
-  cycleTimeSignature,
-  setBarsOn,
-  setBarsOff,
+  toggleSubdivision,
 } = useMetronome(120)
-
-const TEMPO_MIN = 60
-const TEMPO_MAX = 200
 
 const sliderValue = computed({
   get: () => Math.round(tempo.value / 5) * 5,
@@ -70,18 +76,17 @@ watch(flashId, () => {
       ></div>
     </header>
 
-    <button class="time-sig" @click="cycleTimeSignature" aria-label="Change time signature">
-      {{ timeSignature }}
-    </button>
-
-    <div class="tempo-controls">
-      <button class="step-button" @click="setTempo(tempo - 1)" aria-label="Decrease by 1 BPM"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" /></svg></button>
-      <div class="tempo-display">
-        <span class="tempo-value">{{ tempo }}</span>
-        <span class="unit">BPM</span>
-      </div>
-      <button class="step-button" @click="setTempo(tempo + 1)" aria-label="Increase by 1 BPM"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg></button>
-    </div>
+    <Stepper v-model="tempo" :min="TEMPO_MIN" :max="TEMPO_MAX" label="BPM" size="lg" class="tempo-controls">
+      <template #value>
+        <!-- Bespoke rather than the default numeral: proportional figures, and
+             a unit label hung out of flow. Lives here, not in Stepper, because
+             it is the only readout in the app shaped this way. -->
+        <div class="tempo-display">
+          <span class="tempo-value">{{ tempo }}</span>
+          <span class="unit">BPM</span>
+        </div>
+      </template>
+    </Stepper>
 
     <div class="slider-row">
       <span class="slider-bound">{{ TEMPO_MIN }}</span>
@@ -98,6 +103,28 @@ watch(flashId, () => {
       <span class="slider-bound">{{ TEMPO_MAX }}</span>
     </div>
 
+    <div class="meter">
+      <SettingRow label="Beats">
+        <Stepper v-model="beatsPerBar" :min="BEATS_MIN" :max="BEATS_MAX" label="beats per bar" />
+      </SettingRow>
+
+      <SettingRow label="Subdivision">
+        <div class="subdivisions" role="group">
+          <button
+            v-for="s in SUBDIVISIONS"
+            :key="s.value"
+            class="subdiv"
+            :class="{ on: subdivisions.includes(s.value) }"
+            :aria-pressed="subdivisions.includes(s.value)"
+            :aria-label="s.name"
+            @click="toggleSubdivision(s.value)"
+          >
+            <NoteIcon :notes="s.notes" :beams="s.beams" :tuplet="s.tuplet" />
+          </button>
+        </div>
+      </SettingRow>
+    </div>
+
     <div class="mute-bars">
       <label class="mute-toggle">
         <span>Mute Bars</span>
@@ -108,22 +135,12 @@ watch(flashId, () => {
       </label>
 
       <div v-if="muteBarsEnabled" class="mute-steppers">
-        <div class="mute-stepper">
-          <span class="mute-stepper-label">Play</span>
-          <div class="mute-stepper-controls">
-            <button class="mini-button" @click="setBarsOn(barsOn - 1)" aria-label="Fewer bars on"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" /></svg></button>
-            <span class="mute-stepper-value">{{ barsOn }}</span>
-            <button class="mini-button" @click="setBarsOn(barsOn + 1)" aria-label="More bars on"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg></button>
-          </div>
-        </div>
-        <div class="mute-stepper">
-          <span class="mute-stepper-label">Mute</span>
-          <div class="mute-stepper-controls">
-            <button class="mini-button" @click="setBarsOff(barsOff - 1)" aria-label="Fewer bars off"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" /></svg></button>
-            <span class="mute-stepper-value">{{ barsOff }}</span>
-            <button class="mini-button" @click="setBarsOff(barsOff + 1)" aria-label="More bars off"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg></button>
-          </div>
-        </div>
+        <SettingRow label="Play" subtle>
+          <Stepper v-model="barsOn" :min="1" label="bars on" />
+        </SettingRow>
+        <SettingRow label="Mute" subtle>
+          <Stepper v-model="barsOff" :min="1" label="bars off" />
+        </SettingRow>
       </div>
     </div>
 
@@ -415,74 +432,56 @@ watch(flashId, () => {
   }
 }
 
-/* Warm accent so it reads as its own control rather than another grey chip —
+/* Warm accent so the meter reads as its own group rather than more grey chips —
    it's the only thing up here that changes the feel of the click. */
-.time-sig {
-  /* The +1px absorbs the removed 1px border, so swapping it for the ring
-     leaves the rendered size unchanged. */
-  padding: calc(0.5rem + 1px) calc(1.5rem + 1px);
-  border-radius: 999px;
-  border: none;
-  background: var(--warm-fill);
-  color: var(--warm);
-  font-size: 1.2rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  box-shadow: var(--ring-warm);
-  transition: background 0.12s ease-out, transform 0.12s ease-out;
-}
-
-.time-sig:active {
-  background: var(--warm-press);
-  transform: scale(0.96);
-}
-
-.tempo-controls {
+/* Two rows rather than one: the beat count and the subdivisions are separate
+   decisions, and side by side they read as a single crowded strip. Stacking
+   also keeps the four chips on one line at phone widths. */
+.meter {
+  width: 100%;
+  max-width: 20rem;
   display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  /* The BPM label is out of flow, so reserve the space it visually occupies —
-     otherwise the row's gap to the slider collapses to the label's overhang. */
-  margin-bottom: 1.25rem;
+  flex-direction: column;
+  gap: 0.85rem;
 }
 
-.step-button {
-  width: 3.25rem;
-  height: 3.25rem;
+.subdivisions {
+  display: flex;
+  /* Hairline gaps rather than a solid divider: the chips carry their own rings,
+     so a border here would double up. */
+  gap: 0.35rem;
+}
+
+.subdiv {
+  position: relative;
+  width: 2.6rem;
+  height: 2.6rem;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
   border: none;
-  background: var(--surface-raised);
-  color: var(--text);
-  font-size: 1.5rem;
-  line-height: 1;
+  border-radius: 0.7rem;
+  background: transparent;
+  color: var(--text-faint);
   cursor: pointer;
-  box-shadow: var(--ring-accent);
-  transition: background 0.12s ease-out, transform 0.12s ease-out;
+  box-shadow: var(--ring);
+  transition: background 0.12s ease-out, color 0.12s ease-out, transform 0.12s ease-out;
 }
 
-.step-button:active {
-  background: var(--surface-pressed);
+.subdiv:active {
   transform: scale(0.94);
 }
 
-/* Geometric strokes rather than text glyphs. A font's "+" sits on the maths
-   axis and "−" on its own optical line, neither of which is the centre of the
-   em box, so a text button can't centre them however the line-height is set.
-   Here the crossing point is (12,12) in a square viewBox, so flex centring is
-   exact. Sized in em so each button scales its own icon. */
-.icon {
-  display: block;
-  width: 0.9em;
-  height: 0.9em;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2.5;
-  stroke-linecap: round;
+.subdiv.on {
+  background: var(--warm-fill);
+  color: var(--warm);
+  box-shadow: var(--ring-warm);
+}
+
+/* The BPM label is out of flow, so reserve the space it visually occupies —
+   otherwise the row's gap to the slider collapses to the label's overhang. */
+.tempo-controls {
+  margin-bottom: 1.25rem;
 }
 
 /* Only the number participates in the row's height, so `align-items: center`
@@ -659,69 +658,6 @@ watch(flashId, () => {
   border-top: 1px solid var(--border);
 }
 
-.mute-stepper {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.9rem;
-  color: var(--text-muted);
-}
-
-.mute-stepper-label {
-  flex-shrink: 0;
-}
-
-.mute-stepper-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.mute-stepper-value {
-  /* min-width, not width: setBarsOn/Off clamp only at the bottom (Math.max(1,
-     n)), so the value can reach three digits and must be able to grow rather
-     than clip. */
-  min-width: 2.2rem;
-  text-align: center;
-  font-size: 1.75rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: #fff;
-  flex-shrink: 0;
-}
-
-.mini-button {
-  position: relative;
-  width: 2.25rem;
-  height: 2.25rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  border: none;
-  background: var(--surface-raised);
-  color: var(--text);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-  flex-shrink: 0;
-  box-shadow: var(--ring-accent);
-  transition: background 0.12s ease-out, transform 0.12s ease-out;
-}
-
-/* Shrinking the control shouldn't shrink the target: this pads the hit area
-   back out to 44px without changing anything visible. */
-.mini-button::after {
-  content: '';
-  position: absolute;
-  inset: -0.25rem;
-}
-
-.mini-button:active {
-  background: var(--surface-pressed);
-  transform: scale(0.94);
-}
-
 .play-button {
   width: 100%;
   max-width: 20rem;
@@ -769,7 +705,9 @@ watch(flashId, () => {
     font-size: 3rem;
   }
 
-  .step-button {
+  /* :deep, because RoundButton owns its own sizing and scoped styles stop at
+     the component boundary. */
+  .tempo-controls :deep(.round-button.lg) {
     width: 2.75rem;
     height: 2.75rem;
   }
@@ -818,18 +756,12 @@ watch(flashId, () => {
     animation: none;
   }
 
-  .step-button,
-  .mini-button,
   .play-button,
-  .time-sig,
   .switch,
   .switch-thumb {
     transition: none;
   }
 
-  .time-sig:active,
-  .step-button:active,
-  .mini-button:active,
   .play-button:active {
     transform: none;
   }
