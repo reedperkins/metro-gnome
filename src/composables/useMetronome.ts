@@ -9,6 +9,15 @@ const AudioSession = registerPlugin<AudioSessionPlugin>('AudioSession')
 
 const LOOKAHEAD_MS = 25.0
 const SCHEDULE_AHEAD_TIME = 0.1
+const ATTACK_TIME = 0.001
+// Scheduling the first click at exactly `currentTime` puts it in the past by
+// the time the node is wired up, so the envelope's attack ramp is clamped away
+// and the gain steps 0 -> peak instantly, which pops. Start slightly ahead.
+// 60ms is comfortably longer than the first-start latency but short enough to
+// read as instant against the tap. Priming helps but can't be relied on alone:
+// on the very first press the AudioContext is still being constructed, so the
+// warm-up may not have finished by the time the click event fires.
+const START_LEAD_TIME = 0.06
 
 export const TIME_SIGNATURES = ['4/4', '3/4', '6/8', '12/8'] as const
 export type TimeSignature = (typeof TIME_SIGNATURES)[number]
@@ -39,6 +48,7 @@ export function useMetronome(initialTempo = 120) {
   const barsOff = ref(2)
 
   let audioCtx: AudioContext | null = null
+  let primed = false
   let timerId: number | null = null
   let nextNoteTime = 0
   let schedulerBeat = 0
@@ -63,9 +73,13 @@ export function useMetronome(initialTempo = 120) {
 
       const gain = audioCtx.createGain()
       const peak = isBarStart ? 0.9 : isPulse ? 0.7 : 0.4
+      // The attack has to be long enough to avoid a discontinuity at the
+      // waveform's zero crossing (a 1ms step at 1500Hz clicks), but short
+      // enough that the beat still reads as sharp.
       gain.gain.setValueAtTime(0, time)
-      gain.gain.linearRampToValueAtTime(peak, time + 0.001)
+      gain.gain.linearRampToValueAtTime(peak, time + ATTACK_TIME)
       gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.05)
+      gain.gain.linearRampToValueAtTime(0, time + 0.055)
 
       osc.connect(gain)
       gain.connect(audioCtx.destination)
@@ -100,12 +114,37 @@ export function useMetronome(initialTempo = 120) {
     }
   }
 
-  function start() {
-    if (isPlaying.value) return
+  // Bring the audio stack fully online *before* the user asks for sound.
+  // Creating and resuming an AudioContext is not enough: iOS doesn't actually
+  // start the output hardware until something is rendered, and that first
+  // start-up costs tens of milliseconds. Do it on the press that precedes the
+  // Start click, running a silent click through the identical node graph so
+  // the real first beat hits an already-warm path. Safe to call repeatedly.
+  function prime() {
+    activateSession()
+    if (!audioCtx) {
+      audioCtx = new AudioContext()
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume()
+    }
+    if (primed) return
+    primed = true
+
+    const osc = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+    gain.gain.value = 0
+    osc.connect(gain)
+    gain.connect(audioCtx.destination)
+    osc.start()
+    osc.stop(audioCtx.currentTime + 0.05)
+  }
+
+  function activateSession() {
     if (Capacitor.isNativePlatform()) {
       AudioSession.activate().catch(() => {})
     }
-    // WebKit's Web Audio implementation defaults to a "ambient" session
+    // WebKit's Web Audio implementation defaults to an "ambient" session
     // that respects the hardware mute switch. The standardized fix (Safari
     // only, but that's exactly what backs WKWebView) is the AudioSession
     // API: telling it this is "playback" content makes it ignore the switch.
@@ -113,15 +152,15 @@ export function useMetronome(initialTempo = 120) {
     if (nav.audioSession) {
       nav.audioSession.type = 'playback'
     }
-    if (!audioCtx) {
-      audioCtx = new AudioContext()
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume()
-    }
+  }
+
+  function start() {
+    if (isPlaying.value) return
+    prime()
+    if (!audioCtx) return
     schedulerBeat = 0
     schedulerBar = 0
-    nextNoteTime = audioCtx.currentTime
+    nextNoteTime = audioCtx.currentTime + START_LEAD_TIME
     timerId = window.setInterval(scheduler, LOOKAHEAD_MS)
     isPlaying.value = true
   }
@@ -182,6 +221,7 @@ export function useMetronome(initialTempo = 120) {
     muteBarsEnabled,
     barsOn,
     barsOff,
+    prime,
     start,
     stop,
     toggle,

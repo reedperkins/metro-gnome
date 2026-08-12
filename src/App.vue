@@ -12,6 +12,7 @@ const {
   muteBarsEnabled,
   barsOn,
   barsOff,
+  prime,
   toggle,
   setTempo,
   cycleTimeSignature,
@@ -126,7 +127,15 @@ watch(flashId, () => {
       </div>
     </div>
 
-    <button class="play-button" :class="{ playing: isPlaying }" @click="toggle">
+    <!-- Warm the audio stack on press rather than click: the extra ~100ms of
+         finger-down-to-up is enough for iOS to spin the output up, so the
+         first beat lands on already-running hardware. -->
+    <button
+      class="play-button"
+      :class="{ playing: isPlaying }"
+      @pointerdown="prime"
+      @click="toggle"
+    >
       {{ isPlaying ? 'Stop' : 'Start' }}
     </button>
   </div>
